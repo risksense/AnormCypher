@@ -1,6 +1,6 @@
 name := "AnormCypher"
  
-version := "0.7.0"
+version := "0.7.1"
  
 publishMavenStyle := true
 
@@ -16,7 +16,7 @@ resolvers += "Typesafe Releases" at "http://repo.typesafe.com/typesafe/releases/
 
 parallelExecution in Test := false
 
-val playVersion = "2.3.5"
+val playVersion = "2.4.3"
 
 libraryDependencies ++= Seq(
   "org.scalatest" %% "scalatest" % "2.2.4" % "test",

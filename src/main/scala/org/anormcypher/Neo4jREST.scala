@@ -67,12 +67,12 @@ object Neo4jREST {
         k -> ns.asInstanceOf[Seq[JsNumber]].map(_.value)
       case (k, JsArray(ss)) if (ss.forall(_.isInstanceOf[JsString])) =>
         k -> ss.asInstanceOf[Seq[JsString]].map(_.value)
-      case (k, JsObject(o)) => k -> read(o)
+      case (k, JsObject(o)) => k -> read(o.toSeq)
       case _ => throw new RuntimeException(s"unsupported type")
     }).toMap
 
     def reads(json: JsValue) = json match {
-      case JsObject(xs) => JsSuccess(read(xs))
+      case JsObject(xs) => JsSuccess(read(xs.toSeq))
       case x => JsError(s"json not of type Map[String, Any]: $x")
     }
 

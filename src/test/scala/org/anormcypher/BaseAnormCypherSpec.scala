@@ -5,7 +5,7 @@ import play.api.libs.ws._, ning._
 import scala.concurrent._
 
 trait BaseAnormCypherSpec extends FlatSpec with Matchers with BeforeAndAfterEach with BeforeAndAfterAll {
-  val wsclient = new NingWSClient(new NingAsyncHttpClientConfigBuilder(new DefaultWSClientConfig()).build)
+  val wsclient = NingWSClient()
   implicit val neo4jrest = Neo4jREST(scala.util.Properties.envOrElse("NEO4J_SERVER", "localhost"))(wsclient)
   implicit val ec = ExecutionContext.global
 
