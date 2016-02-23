@@ -3,8 +3,9 @@ package org.anormcypher
 import scala.concurrent.Await
 import scala.concurrent.ExecutionContext
 import scala.concurrent.Future
-import scala.concurrent.duration._
+import scala.concurrent.duration.DurationInt
 
+import play.api.http.HttpVerbs
 import play.api.libs.json.JsSuccess
 import play.api.libs.json.Reads
 import play.api.libs.json.Writes
@@ -20,24 +21,28 @@ import play.api.libs.json.JsBoolean
 import play.api.libs.json.Format
 import play.api.libs.json.Json
 import play.api.libs.json.JsPath
-import play.api.libs.ws._
+import play.api.libs.iteratee.Enumerator
+import play.api.libs.iteratee.Iteratee
+import play.api.libs.ws.WSAuthScheme
+import play.api.libs.ws.WSClient
+import play.api.libs.ws.WSRequest
 
 
 class Neo4jREST(
     wsclient: WSClient,
-    val host: String = "localhost",
-    val port: Int = 7474,
-    val path: String = "/db/data/",
-    val username: String = "",
-    val password: String = "",
-    val cypherEndpoint: String = "cypher",
+    val host: String,
+    val port: Int,
+    val path: String,
+    val username: String,
+    val password: String,
+    val cypherEndpoint: String,
     val https: Boolean = false) {
 
   private val headers = Seq(
-    "Accept" -> "application/json",
+    "Accept" -> "application/json", // scalastyle:ignore multiple.string.literals
     "Content-Type" -> "application/json",
     "X-Stream" -> "true",
-    "User-Agent" -> "AnormCypher/0.7.0"
+    "User-Agent" -> "AnormCypher/0.8.1"
   )
 
   private val baseURL = {
@@ -46,51 +51,56 @@ class Neo4jREST(
     s"$protocol://$host:$port/$pth"
   }
 
+  private val cypherUrl = baseURL + cypherEndpoint
+
   private def request = {
-    val req = wsclient.url(baseURL + cypherEndpoint).withHeaders(headers:_*)
+    val req = wsclient.url(cypherUrl).withHeaders(headers: _*)
     if (username.isEmpty) {
-      req 
+      req
     } else {
       req.withAuth(username, password, WSAuthScheme.BASIC)
     }
   }
 
-  private def otherRequest(ep: String) = {
-    val req = wsclient.url(baseURL + ep).withHeaders(headers:_*)
+  /** Creates a [[WSRequest]] with custom endpoint
+    *
+    * @param ep an endpoint
+    * @return a [[WSRequest]] with the provided endpoint
+    */
+  private def otherRequest(ep: String): WSRequest = {
+    val req = wsclient.url(baseURL + ep).withHeaders(headers: _*)
     if (username.isEmpty) {
-      req 
+      req
     } else {
       req.withAuth(username, password, WSAuthScheme.BASIC)
     }
   }
 
-  def sendQuery(
-      cypherStatement: CypherStatement)
-      (implicit ec: ExecutionContext): Future[Stream[CypherResultRow]] = {
+  /** Asynchronous, non-streaming query */
+  def sendQuery(cypherStatement: CypherStatement)
+      (implicit ec: ExecutionContext): Future[Seq[CypherResultRow]] =
+    query(cypherStatement)(ec) |>>> Iteratee.getChunks[CypherResultRow]
 
-    implicit val csw = Neo4jREST.cypherStatementWrites
-    implicit val csr = Neo4jREST.cypherRESTResultReads
+  /** Asynchornous, streaming (i.e. reactive) query */
+  def query(stmt: CypherStatement)
+      (implicit ec: ExecutionContext): Enumerator[CypherResultRow] = {
 
-    val result = request.post(Json.toJson(cypherStatement)(csw))
-    result.map { response =>
-      val strResult = response.body
-      if (response.status != 200) {
-        throw new RuntimeException(strResult)
+    val req = request.withMethod(HttpVerbs.POST)
+    val source = req.
+                   withBody(
+                     Json.toJson(stmt)(Neo4jREST.cypherStatementWrites)).
+                   stream()
+
+    Enumerator.flatten(source map { case (resp, body) =>
+      if (resp.status == 400) {
+        Neo4jStream.errMsg(body)
+      } else {
+        Neo4jStream.parse(body)
       }
-      val cypherRESTResult =
-        Json.fromJson[CypherRESTResult](Json.parse(strResult)).get
-      val metaDataItems: List[MetaDataItem] = cypherRESTResult.
-          columns.
-          map {c => MetaDataItem(c, false, "String")}.
-          toList
-      val metaData = MetaData(metaDataItems)
-      cypherRESTResult.
-        data.
-        map { d => CypherResultRow(metaData, d.toList) }.
-        toStream
-    }
+    })
   }
 
+  // scalastyle:off
   /** Sends Cypher data as a transaction
     *
     * A [[CypherTranscation]] is sent to a provided endpoint. The response
@@ -149,20 +159,24 @@ class Neo4jREST(
       }
     Await.result(res, 10.seconds)
   }
+  // scalastyle:on
 
 }
 
 object Neo4jREST {
 
+  val SELF = "self"
+  val DATA = "data"
+
   def apply(
       host: String = "localhost",
-      port: Int = 7474,
+      port: Int = 7474, // scalastyle:ignore magic.number
       path: String = "/db/data/",
       username: String = "",
       password: String = "",
       cypherEndpoint: String = "cypher",
       https: Boolean = false)
-      (implicit wsclient: WSClient)= {
+      (implicit wsclient: WSClient): Neo4jREST = {
     new Neo4jREST(wsclient, host, port, path, username,
                   password, cypherEndpoint, https)
   }
@@ -265,14 +279,14 @@ object Neo4jREST {
   object IdURLExtractor {
 
     def unapply(s: String): Option[Long] = s.lastIndexOf('/') match {
-      case pos if pos >= 0 => Some(s.substring(pos + 1).toLong)
+      case pos: Int if pos >= 0 => Some(s.substring(pos + 1).toLong)
       case _ => None
     }
 
   }
 
   def asNode(msa: Map[String, Any]): MayErr[CypherRequestError, NeoNode] = {
-    (msa.get("self"), msa.get("data")) match {
+    (msa.get(SELF), msa.get(DATA)) match {
       case (Some(IdURLExtractor(id)), Some(props: Map[_, _])) if
           props.keys.forall(_.isInstanceOf[String]) =>
         Right(NeoNode(id, props.asInstanceOf[Map[String, Any]]))
@@ -283,7 +297,7 @@ object Neo4jREST {
 
   def asRelationship(
       m: Map[String, Any]): MayErr[CypherRequestError, NeoRelationship] = {
-    (m.get("self"), m.get("start"), m.get("end"), m.get("data")) match {
+    (m.get(SELF), m.get("start"), m.get("end"), m.get(DATA)) match {
       case (Some(IdURLExtractor(id)),
             Some(IdURLExtractor(sId)),
             Some(IdURLExtractor(eId)),

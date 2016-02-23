@@ -2,20 +2,23 @@ package org.anormcypher
 
 import CypherParser.CypherResultSet
 
+import MayErr.eitherToError
+import MayErr.errorToEither
+
+import java.util.Date
+
 object CypherParser {
 
-  import MayErr._
-  import java.util.Date
-
-  type CypherResultSet = Stream[CypherRow]
+  type CypherResultSet = Seq[CypherRow]
 
   def scalar[T](implicit transformer: Column[T]): CypherRowParser[T] = {
     CypherRowParser[T] { row =>
-      (for {
+      val res = for {
         meta <- row.metaData.ms.headOption.toRight(NoColumnsInReturnedResult)
         value <- row.data.headOption.toRight(NoColumnsInReturnedResult)
         result <- transformer(value, meta)
-      } yield result).fold(e => Error(e), a => Success(a))
+      } yield result
+      res.fold(e => Error(e), a => Success(a))
     }
   }
 
@@ -56,23 +59,20 @@ object CypherParser {
       columnName: String)
       (implicit extractor: org.anormcypher.Column[T]): CypherRowParser[T] = {
     CypherRowParser { row =>
-
-      import MayErr._
-
-      (for {
+      val res = for {
         meta <- row.metaData.get(columnName)
           .toRight(ColumnNotFound(columnName, row.metaData.availableColumns))
         value <- row.get1(columnName)
         result <- extractor(value, MetaDataItem(meta._1, meta._2, meta._3))
-      } yield result).fold(e => Error(e), a => Success(a))
+      } yield result
+      res.fold(e => Error(e), a => Success(a))
     }
   }
 
   def contains[TT: Column, T <: TT](
       columnName: String, t: T): CypherRowParser[Unit] = {
     get[TT](columnName)(implicitly[Column[TT]])
-      .collect("CypherRow doesn't contain a column: " +
-               s"$columnName with value $t") {
+      .collect(s"CypherRow doesn't contain a column: $columnName with value $t") {
         case a if a == t => Unit
       }
   }
@@ -153,10 +153,11 @@ trait CypherRowParser[+A] extends (CypherRow => CypherResult[A]) {
       p: CypherRowParser[B]): CypherRowParser[B] = CypherRowParser { row =>
     parent(row) match {
       case Error(_) => p(row)
-      case a => a
+      case a: CypherResult[A] => a
     }
   }
 
+  // scalastyle:off disallow.space.before.token
   def ? : CypherRowParser[Option[A]] = CypherRowParser { row =>
     parent(row) match {
       case Success(a) => Success(Some(a))
@@ -171,6 +172,7 @@ trait CypherRowParser[+A] extends (CypherRow => CypherResult[A]) {
   def + : CypherResultSetParser[List[A]] = {
     CypherResultSetParser.nonEmptyList(parent)
   }
+  // scalastyle:off disallow.space.before.token
 
   // scalastyle:on method.name
 
@@ -206,12 +208,10 @@ object CypherResultSetParser {
     @scala.annotation.tailrec
     def sequence(
         results: CypherResult[List[A]],
-        rows: Stream[CypherRow]): CypherResult[List[A]] = {
-      (results, rows) match {
-        case (Success(rs), row #:: tail) =>
-          sequence(p(row).map(_ +: rs), tail)
-        case (r, _) => r
-      }
+        rows: Seq[CypherRow]): CypherResult[List[A]] = (results, rows) match {
+      case (Success(rs), Seq(row, tail @ _ *)) =>
+        sequence(p(row).map(_ +: rs), tail)
+      case (r, _) => r
     }
 
     CypherResultSetParser { rows =>
@@ -232,21 +232,21 @@ object CypherResultSetParser {
 
   def single[A](p: CypherRowParser[A]): CypherResultSetParser[A] = {
     CypherResultSetParser {
-      case head #:: Stream.Empty => p(head)
-      case Stream.Empty => Error(
-          CypherMappingError("No rows when expecting a single one"))
-      case _ => Error(
-          CypherMappingError("too many rows when expecting a single one"))
+      case Seq(head) => p(head)
+      case Seq() =>
+        Error(CypherMappingError("No rows when expecting a single one"))
+      case _ =>
+        Error(CypherMappingError("Too many rows when expecting a single one"))
     }
   }
 
   def singleOpt[A](
       p: CypherRowParser[A]): CypherResultSetParser[Option[A]] = {
     CypherResultSetParser {
-      case head #:: Stream.Empty => p.map(Some(_))(head)
-      case Stream.Empty => Success(None)
-      case _ => Error(
-          CypherMappingError("too many rows when expecting a single one"))
+      case Seq(head) => p.map(Some(_))(head)
+      case Seq() => Success(None)
+      case _ =>
+        Error(CypherMappingError("too many rows when expecting a single one"))
     }
   }
 
